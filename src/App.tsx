@@ -1,16 +1,20 @@
 /**
  * @license
- * SPDX-License-Identifier: Apache-2.0
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ *
+ * PWA Wrapper — AI Studio Companion Documentation Hub & Bridge Playground
+ * Provides a live browser/editor for `/docs/*.md`, a REST API playground for `/api/*`,
+ * and an 800ms header long-press test hook wired to `pedigreeBridge.openNativeDevPanel()`.
+ * (Not bundled inside the Android APK; see `android-wrapper/` for the native shell.)
  */
 
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { 
   FileText, Plus, Search, Edit3, Eye, Trash2, Save, Sparkles, 
   FolderOpen, Terminal, BookOpen, Moon, Sun, Copy, Check, 
-  RefreshCw, Layers, Send, Download, ExternalLink, Code2, Shield
+  RefreshCw, Send, Code2
 } from 'lucide-react';
 import { marked } from 'marked';
-import confetti from 'canvas-confetti';
 import { pedigreeBridge } from './native/pedigreeBridge';
 
 interface DocFile {
@@ -50,16 +54,33 @@ export default function App() {
   const [apiResponse, setApiResponse] = useState<string>('// Select an endpoint and click Send Request');
   const [apiLoading, setApiLoading] = useState<boolean>(false);
 
-  // Copy code feedback
+  // Copy & inline delete confirmation state
   const [copiedCode, setCopiedCode] = useState<string | null>(null);
+  const [confirmDeleteFile, setConfirmDeleteFile] = useState<string | null>(null);
 
-  // Long press refs for Zone 1 icon
-  const longPressTimerRef = useRef<any>(null);
+  // Refs for timers and current selection
+  const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const copiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const deleteConfirmTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const selectedFileRef = useRef<string | null>(selectedFile);
+  selectedFileRef.current = selectedFile;
   const startPosRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
+
+  useEffect(() => {
+    return () => {
+      if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current);
+      if (copiedTimerRef.current) clearTimeout(copiedTimerRef.current);
+      if (deleteConfirmTimerRef.current) clearTimeout(deleteConfirmTimerRef.current);
+    };
+  }, []);
 
   const handlePointerDown = (e: React.PointerEvent) => {
     startPosRef.current = { x: e.clientX, y: e.clientY };
+    if (longPressTimerRef.current) {
+      clearTimeout(longPressTimerRef.current);
+    }
     longPressTimerRef.current = setTimeout(() => {
+      longPressTimerRef.current = null;
       pedigreeBridge.openNativeDevPanel();
       setActiveTab('playground');
     }, 800);
@@ -123,7 +144,7 @@ export default function App() {
       const data = await res.json();
       if (data.success) {
         setFiles(data.files);
-        if (data.files.length > 0 && !selectedFile) {
+        if (data.files.length > 0 && !selectedFileRef.current) {
           selectDocument(data.files[0].name);
         }
       }
@@ -137,8 +158,9 @@ export default function App() {
   const selectDocument = async (filename: string) => {
     setSelectedFile(filename);
     setIsEditing(false);
+    setConfirmDeleteFile(null);
     try {
-      const res = await fetch(`/api/docs/${filename}`);
+      const res = await fetch(`/api/docs/${encodeURIComponent(filename)}`);
       const data = await res.json();
       if (data.success) {
         setContent(data.content);
@@ -159,7 +181,9 @@ export default function App() {
       });
       const data = await res.json();
       if (data.success) {
-        confetti({ particleCount: 50, spread: 60, origin: { y: 0.8 } });
+        void import('canvas-confetti')
+          .then((mod) => mod.default({ particleCount: 50, spread: 60, origin: { y: 0.8 } }))
+          .catch(() => {});
         fetchDocs();
       }
     } catch (err) {
@@ -171,12 +195,26 @@ export default function App() {
 
   const handleDelete = async (filename: string, e: React.MouseEvent) => {
     e.stopPropagation();
-    if (!confirm(`Are you sure you want to delete ${filename}?`)) return;
+    if (confirmDeleteFile !== filename) {
+      setConfirmDeleteFile(filename);
+      if (deleteConfirmTimerRef.current) clearTimeout(deleteConfirmTimerRef.current);
+      deleteConfirmTimerRef.current = setTimeout(() => {
+        setConfirmDeleteFile((prev) => (prev === filename ? null : prev));
+      }, 4000);
+      return;
+    }
+
+    if (deleteConfirmTimerRef.current) {
+      clearTimeout(deleteConfirmTimerRef.current);
+      deleteConfirmTimerRef.current = null;
+    }
+    setConfirmDeleteFile(null);
+
     try {
-      const res = await fetch(`/api/docs/${filename}`, { method: 'DELETE' });
+      const res = await fetch(`/api/docs/${encodeURIComponent(filename)}`, { method: 'DELETE' });
       const data = await res.json();
       if (data.success) {
-        if (selectedFile === filename) {
+        if (selectedFileRef.current === filename) {
           setSelectedFile(null);
           setContent('');
         }
@@ -215,7 +253,7 @@ export default function App() {
   };
 
   const handleAiAction = async () => {
-    if (!aiPrompt.trim()) return;
+    if (!aiPrompt.trim() || aiLoading) return;
     setAiLoading(true);
     try {
       const res = await fetch('/api/ai/generate', {
@@ -223,7 +261,7 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           prompt: aiPrompt,
-          currentContent: content,
+          currentContent: aiMode === 'polish' ? content : undefined,
           mode: aiMode,
         }),
       });
@@ -281,14 +319,15 @@ export default function App() {
 
   const renderedHtml = useMemo(() => {
     try {
-      return marked.parse(content || '');
+      return marked.parse(content || '', { async: false }) as string;
     } catch {
       return '<p>Error rendering markdown</p>';
     }
   }, [content]);
 
   const wordCount = useMemo(() => {
-    return content ? content.trim().split(/\s+/).length : 0;
+    const trimmed = content ? content.trim() : '';
+    return trimmed ? trimmed.split(/\s+/).length : 0;
   }, [content]);
 
   const readingTime = Math.ceil(wordCount / 200);
@@ -300,20 +339,21 @@ export default function App() {
       <header className="flex items-center justify-between gap-8 px-6 py-3.5 border-b border-slate-200 dark:border-slate-800 bg-white/80 dark:bg-slate-900/80 backdrop-blur sticky top-0 z-30">
         {/* Zone 1: Brand Wordmark */}
         <div 
-          className="flex items-center gap-3 shrink-0 cursor-pointer select-none"
+          className="flex items-center gap-3 shrink-0 cursor-pointer select-none touch-manipulation"
           onPointerDown={handlePointerDown}
           onPointerMove={handlePointerMove}
           onPointerUp={handlePointerUp}
           onPointerCancel={handlePointerUp}
+          onContextMenu={(e) => e.preventDefault()}
           title="Community Pedigree (Hold 800ms for Dev Panel)"
         >
           <div className="w-9 h-9 rounded-xl bg-indigo-600 flex items-center justify-center text-white shadow-md shadow-indigo-500/20">
             <BookOpen className="w-5 h-5" />
           </div>
           <div>
-            <span className="text-lg font-bold tracking-tight text-slate-900 dark:text-white">Community Pedigree</span>
+            <span className="text-lg font-bold tracking-tight text-slate-900 dark:text-white">PWA Wrapper</span>
             <span className="hidden sm:inline-block ml-2 text-xs px-2 py-0.5 rounded-full bg-indigo-50 dark:bg-indigo-950/60 text-indigo-600 dark:text-indigo-400 font-medium">
-              {pedigreeBridge.isNativeWrapper() ? `${pedigreeBridge.getPlatform().toUpperCase()} Native` : 'PWA Hub'}
+              {pedigreeBridge.isNativeWrapper() ? `${pedigreeBridge.getPlatform().toUpperCase()} Native` : 'Docs Hub'}
             </span>
           </div>
         </div>
@@ -426,13 +466,17 @@ export default function App() {
                           <FileText className={`w-4 h-4 shrink-0 ${isSelected ? 'text-indigo-600 dark:text-indigo-400' : 'text-slate-400'}`} />
                           <span className="truncate">{file.title}</span>
                         </div>
-                        <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                        <div className={`flex items-center gap-1 transition-opacity ${confirmDeleteFile === file.name ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}>
                           <button
                             onClick={(e) => handleDelete(file.name, e)}
-                            className="p-1 rounded text-slate-400 hover:text-red-500 transition-colors"
-                            title="Delete document"
+                            className={`px-1.5 py-1 rounded text-[11px] font-semibold transition-colors ${
+                              confirmDeleteFile === file.name
+                                ? 'bg-red-500/15 text-red-500 hover:bg-red-500/25'
+                                : 'text-slate-400 hover:text-red-500'
+                            }`}
+                            title={confirmDeleteFile === file.name ? 'Click again to confirm deletion' : 'Delete document'}
                           >
-                            <Trash2 className="w-3.5 h-3.5" />
+                            {confirmDeleteFile === file.name ? 'Delete?' : <Trash2 className="w-3.5 h-3.5" />}
                           </button>
                         </div>
                       </div>
@@ -518,8 +562,8 @@ export default function App() {
           /* API Playground Tab */
           <div className="flex-1 flex flex-col p-6 md:p-10 overflow-y-auto max-w-6xl mx-auto w-full">
             <div className="mb-6">
-              <h2 className="text-xl font-bold tracking-tight text-slate-900 dark:text-white">DocsCraft API Playground</h2>
-              <p className="text-xs text-slate-500 mt-1">Test the backend REST API endpoints directly from your browser.</p>
+              <h2 className="text-xl font-bold tracking-tight text-slate-900 dark:text-white">PWA Wrapper API Playground</h2>
+              <p className="text-xs text-slate-500 mt-1">Test the companion documentation server REST API endpoints directly from your browser.</p>
             </div>
 
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -582,9 +626,10 @@ export default function App() {
                   </h3>
                   <button
                     onClick={() => {
-                      navigator.clipboard.writeText(apiResponse);
+                      void navigator.clipboard?.writeText(apiResponse).catch(() => {});
                       setCopiedCode('response');
-                      setTimeout(() => setCopiedCode(null), 2000);
+                      if (copiedTimerRef.current) clearTimeout(copiedTimerRef.current);
+                      copiedTimerRef.current = setTimeout(() => setCopiedCode(null), 2000);
                     }}
                     className="flex items-center gap-1 text-xs text-slate-500 hover:text-slate-700 dark:hover:text-slate-300"
                   >

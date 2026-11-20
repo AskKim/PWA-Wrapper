@@ -1,45 +1,39 @@
-# Getting Started with DocsCraft
+# Getting Started with PWA Wrapper
 
-Welcome to **DocsCraft**, your comprehensive technical documentation studio and AI-powered knowledge base.
+Welcome to **PWA Wrapper** (`AGPL-3.0-or-later`), a hardened, offline-first Kotlin Android WebView shell and zero-dependency TypeScript bridge (`pedigreeBridge`) designed originally for **Community Pedigree** (`AskKim/Pedigree`) and built for clarity by both human developers and AI assistants.
 
 ## Overview
 
-DocsCraft is designed to help engineering teams, product managers, and developers write, organize, preview, and synchronize technical documentation with absolute precision. 
+PWA Wrapper bundles a static Vite/React PWA (`dist/`) into a standalone Android APK served locally over HTTPS (`https://appassets.androidplatform.net`) using AndroidX `WebViewAssetLoader`, with native bridges for Back navigation, file picking, binary export/sharing, printing, external links, backup vault mirroring, and diagnostics.
 
-### Key Features
+### Key Capabilities
+- **100% Offline Cold Launch**: Serves bundled web assets without requiring internet access.
+- **Origin-Locked Native Bridge (`window.pedigreeNative`)**: Zero `addJavascriptInterface`; uses AndroidX `WebMessageListener` + `ArrayBuffer` binary streaming.
+- **Native Android UX**: Back-stack modal/route unwinding, SAF file save, `FileProvider` Share Sheet, `PrintManager` PDF/printing, Custom Tabs for external URLs.
+- **Native Backup Vault & Developer Panel**: Automatic 5-snapshot deduplicated mirror in `filesDir/pedigree-vault/` and a built-in Storage Truth + 100-event diagnostics panel.
 
-- **Live Docs Folder Browser**: Direct synchronization with your local `/docs` folder.
-- **Advanced Markdown Editor**: Dual-pane editing with real-time preview and syntax highlighting.
-- **AI Documentation Assistant**: Generate boilerplates, explain complex code, or auto-document APIs instantly using Gemini.
-- **Interactive Code Playgrounds**: Test snippets and inspect logs directly within your reference guides.
-- **Instant Search & Navigation**: Find any guide, endpoint, or architectural diagram in milliseconds.
+> **Important:** Before wrapping your own PWA, read [Wrapper Scope & Compatibility](./wrapper-scope-and-compatibility.md) to see exactly what v1 **does** and **does not** include so you know what web APIs (`<a download="blob:">`, `window.print()`, `window.open()`, OPFS on `<109`, OAuth) need bridge calls or fallbacks.
 
-## Quick Installation
+## Quick Verification
 
-To run DocsCraft locally or deploy to your production environment:
-
-\`\`\`bash
-# Clone the repository
-git clone https://github.com/docscraft/hub.git
-
-# Install dependencies
+```bash
+# Install dependencies for the TypeScript bridge & companion docs hub
 npm install
 
-# Start the development server
-npm run dev
-\`\`\`
+# Run the 26 unit tests covering pedigreeBridge
+npm test
 
-## Directory Structure
+# Typecheck TypeScript
+npm run lint
 
-Your documentation files reside directly in the \`/docs\` folder at the root of your project:
+# Build the companion app
+npm run build
+```
 
-\`\`\`
-/docs
-  ├── getting-started.md
-  ├── api-reference.md
-  ├── architecture.md
-  ├── deployment.md
-  └── ai-integration.md
-\`\`\`
+## Directory Overview
 
-Ready to dive deeper? Check out the [API Reference](./api-reference.md) or explore our [Architecture Guide](./architecture.md).
+- `android-wrapper/` — Standalone Gradle/Kotlin Android project (`minSdk 26`, `targetSdk 36`)
+- `src/native/` — Canonical `pedigreeBridge.ts` and `pedigreeBridge.test.ts`
+- `ready for export/` — Reference integration files for `AskKim/Pedigree`
+- `docs/` — Architecture, bridge API reference, phase plans, and compatibility docs
+- `fastlane/metadata/android/` — F-Droid & release store metadata

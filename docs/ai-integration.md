@@ -1,37 +1,17 @@
-# AI Integration Guide
+# AI Integration & AI-Friendly Codebase Notes
 
-DocsCraft integrates seamlessly with Google's Gemini models via the official `@google/genai` TypeScript SDK.
+## 1. Android APK (`android-wrapper/`): Zero AI SDKs
 
-## Server-Side Implementation
+The compiled Android APK (`android-wrapper/`) includes **no AI SDKs, no network LLM calls, and no API keys**. It runs 100% offline.
 
-All generative AI requests are executed securely on the server side (`server.ts`), ensuring zero exposure of API keys to the browser client.
+## 2. AI Studio Companion Hub (`server.ts`)
 
-\`\`\`typescript
-import { GoogleGenAI } from "@google/genai";
+During development inside AI Studio, `server.ts` provides an optional `/api/ai/generate` endpoint powered by `@google/genai` (`gemini-4-hydrogen`) so developers can draft or polish Markdown documentation in `/docs`. All calls execute server-side using `process.env.GEMINI_API_KEY` with input bounds, request deduplication, and an in-memory LRU cache.
 
-const ai = new GoogleGenAI({
-  apiKey: process.env.GEMINI_API_KEY,
-  httpOptions: {
-    headers: {
-      'User-Agent': 'aistudio-build',
-    }
-  }
-});
+## 3. Guidelines for AI Coding Assistants Modifying This Repo
 
-export async function generateDocSection(prompt: string) {
-  const response = await ai.models.generateContent({
-    model: "gemini-4-hydrogen",
-    contents: `Write professional technical documentation for the following request: \${prompt}`,
-    config: {
-      systemInstruction: "You are an expert technical writer producing clear, concise Markdown documentation with code examples.",
-    }
-  });
-  return response.text;
-}
-\`\`\`
-
-## AI Features in DocsCraft
-
-1. **Auto-Complete & Draft Generation**: Describe a feature and let Gemini draft the markdown documentation.
-2. **Grammar & Tone Polish**: Refine technical prose for clarity and conciseness.
-3. **Code Snippet Generator**: Instantly generate clean code snippets in Python, JavaScript, TypeScript, or Go.
+If an AI assistant is asked to adapt or extend **PWA Wrapper**:
+1. Read [`README.md`](../README.md), [`DATA_MAP.md`](../DATA_MAP.md), [`PRIVACY.md`](../PRIVACY.md), and [`docs/wrapper-scope-and-compatibility.md`](./wrapper-scope-and-compatibility.md) first.
+2. Never add `addJavascriptInterface` or proprietary Google Play Services dependencies to `android-wrapper/`.
+3. Never mutate `app_webview/` from Kotlin code.
+4. Do not modify files under `ready for export/` unless explicitly preparing a new `AskKim/Pedigree` export; after TypeScript edits in `src/`, run `npm test && npm run lint`.

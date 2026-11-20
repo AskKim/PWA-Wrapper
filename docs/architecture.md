@@ -1,39 +1,46 @@
-# System Architecture
+# System Architecture — PWA Wrapper
 
-DocsCraft is engineered with a modern full-stack TypeScript architecture optimized for lightning-fast performance, zero-latency document editing, and robust AI integration.
+**PWA Wrapper** separates the web application (`pedigreeBridge.ts`) from the native Android host (`android-wrapper/`) using a strict, origin-locked message-passing boundary.
 
 ## Architectural Diagram
 
-\`\`\`
-+-------------------------------------------------------------+
-|                       Client (React)                        |
-|  - Tailwind CSS v4 UI      - Live Markdown Preview          |
-|  - Sidebar File Tree       - AI Doc Assistant Dialog        |
-+-------------------------------------------------------------+
-                               |
-                               | HTTP / JSON / SSE
-                               v
-+-------------------------------------------------------------+
-|                    Server (Node.js / Express)               |
-|  - File System Sync (/docs)   - @google/genai SDK Integration|
-|  - RESTful Document API      - Error Handling & Validation  |
-+-------------------------------------------------------------+
-                               |
-                               | Read / Write
-                               v
-+-------------------------------------------------------------+
-|                      Local File System                      |
-|                     /docs/*.md files                        |
-+-------------------------------------------------------------+
-\`\`\`
+```text
++-------------------------------------------------------------------+
+|               PWA Web Layer (dist/ in assets/www/)                |
+|  - Served at https://appassets.androidplatform.net/index.html     |
+|  - src/native/pedigreeBridge.ts (ES2018, zero npm dependencies)   |
+|  - Browser fallbacks when !isNativeWrapper()                      |
++-------------------------------------------------------------------+
+                 |                                 ^
+                 | WebMessageCompat                | replyProxy /
+                 | (JSON + ArrayBuffer)            | __pedigreeBridgeReceive
+                 v                                 |
++-------------------------------------------------------------------+
+|          MainActivity.kt (Origin-Locked WebView Host)             |
+|  - PedigreeAssetPathHandler (assets/www/ -> virtual HTTPS origin) |
+|  - PedigreeServiceWorkerClient (SW asset interception)            |
+|  - BackNavigationBridge     - FileAndExportBridge                 |
+|  - PrintBridge              - ExternalNavigationBridge            |
+|  - NativeBackupVault        - DiagnosticRingBuffer                |
+|  - DeveloperPanelDialog     - Renderer Crash Circuit Breaker      |
++-------------------------------------------------------------------+
+                 |
+                 v
++-------------------------------------------------------------------+
+|                 Private Android App Sandbox                       |
+|  - app_webview/ (Chromium IDB/SQLite/OPFS — read-only accounting) |
+|  - filesDir/pedigree-vault/ (5-snapshot SHA-256 vault)            |
+|  - cacheDir/exports/ (1h TTL FileProvider share staging)          |
++-------------------------------------------------------------------+
+```
 
-## Core Components
+## Core Layers
 
-### 1. Frontend Layer
-Built with **React 19**, **Vite**, and **Tailwind CSS v4**. It features a responsive layout with a collapsible sidebar, tabbed file switcher, dark mode support, and a real-time markdown renderer.
+### 1. TypeScript Bridge (`src/native/pedigreeBridge.ts`)
+Detects Android (`window.pedigreeNative`), iOS (`window.webkit.messageHandlers.pedigreeNative`), or standard browser (`web`). In wrapped environments, it translates high-level web actions (binary export, print, back press, external links, vault snapshots, container info) into structured JSON + `ArrayBuffer` envelopes.
 
-### 2. Backend Middleware
-An Express server (\`server.ts`) mounting Vite middleware in development. It exposes secure endpoints for reading, writing, and listing files inside the \`/docs\` directory.
+### 2. Android WebView Shell (`android-wrapper/`)
+Built with pure AndroidX (`appcompat`, `webkit`, `browser`) and Kotlin stdlib—zero Capacitor, Cordova, or proprietary Google Play Services SDKs. Enforces OWASP WebView hardening (`allowFileAccess = false`, `MIXED_CONTENT_NEVER_ALLOW`, Safe Browsing, no `addJavascriptInterface`).
 
-### 3. AI Intelligence Layer
-Powered by the official \`@google/genai\` SDK using \`gemini-4-hydrogen\`. All AI calls are executed securely on the server side, protecting API credentials while giving users instant AI writing assistance.
+### 3. AI Studio Companion Hub (`src/App.tsx` & `server.ts`)
+Used only during development inside AI Studio (port 3000) to browse/edit `/docs/*.md` and inspect bridge APIs. **Not** packaged inside the Android APK.

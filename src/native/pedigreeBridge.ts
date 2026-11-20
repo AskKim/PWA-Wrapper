@@ -2,52 +2,95 @@
  * Community Pedigree — Native Wrapper Bridge
  * Copyright (C) 2026 Community Pedigree Contributors
  * SPDX-License-Identifier: AGPL-3.0-or-later
+ *
+ * @module pedigreeBridge
+ * @description
+ * Zero-dependency, ES2018-compatible bridge connecting a web PWA to the native
+ * Android WebView shell (`window.pedigreeNative` via AndroidX `WebMessageListener`)
+ * or a future iOS `WKWebView` host (`window.webkit.messageHandlers.pedigreeNative`).
+ *
+ * When running in a standard desktop or mobile browser (`getPlatform() === 'web'`),
+ * every method falls back cleanly to standard Web APIs (`window.print()`,
+ * `navigator.share()`, Blob downloads, `popstate`, or safe no-ops) so the same
+ * codebase runs identically wrapped or unwrapped.
  */
 
+/** Runtime container platform detected by {@link PedigreeBridge.getPlatform}. */
 export type NativePlatform = 'android' | 'ios' | 'web';
 
+/**
+ * Standard JSON control envelope exchanged across the WebView bridge.
+ * Request/reply pairs (such as `NATIVE_BACK` / `NATIVE_BACK_RESULT` and
+ * `GET_CONTAINER_INFO` / `CONTAINER_INFO_RESULT`) correlate via `requestId`.
+ */
 export interface NativeEnvelope<TPayload extends Record<string, unknown> = Record<string, unknown>> {
+  /** Message discriminator (e.g. `'BEGIN_BINARY_TRANSFER'`, `'NATIVE_BACK'`). */
   type: string;
+  /** Optional correlation ID for request/reply envelopes. */
   requestId?: string;
+  /** Optional structured JSON payload. */
   payload?: TPayload;
 }
 
+/**
+ * Honest container, WebView, and backup-vault metadata reported by the native shell
+ * in response to `GET_CONTAINER_INFO`.
+ */
 export interface NativeContainerInfo {
   platform: NativePlatform;
   appVersion?: string;
   webViewPackage?: string;
   webViewVersion?: string;
+  /** Major Chromium version of the installed System WebView (OPFS requires >= 109). */
   webViewMajorVersion?: number;
+  /** `false` on WebView < 109 where Origin Private File System is unavailable. */
   opfsSupportedInWebView?: boolean;
+  /** Origin currently allowed by the WebMessageListener (e.g. `https://appassets.androidplatform.net`). */
   origin?: string;
   isDebugBuild?: boolean;
+  /** Number of backup snapshots currently retained in `filesDir/pedigree-vault/`. */
   vaultSnapshotCount?: number;
+  /** Combined size in bytes of retained native vault snapshots. */
   vaultTotalBytes?: number;
+  /** ISO-8601 timestamp of the newest native vault backup, or `null` if none yet. */
   lastVaultBackupAt?: string | null;
+  /** Read-only byte size of Chromium's `app_webview` directory (`-1` or omitted if pending). */
   appWebViewBytes?: number;
 }
 
+/** Options passed to {@link PedigreeBridge.exportOrShareBinary}. */
 export interface BinaryExportOptions {
+  /** Suggested filename (native side sanitizes directory separators and control characters). */
   filename: string;
+  /** Standard MIME type (e.g. `'application/zip'`, `'application/json'`, `'application/pdf'`). */
   mimeType: string;
+  /** `'save'` opens Android SAF (`ACTION_CREATE_DOCUMENT`); `'share'` opens Android Share Sheet (`FileProvider`). */
   mode: 'save' | 'share';
+  /** Raw file bytes. Keep as `Uint8Array` or `ArrayBuffer` so no extra JSON encoding occurs on Android. */
   bytes: Uint8Array | ArrayBuffer;
 }
 
+/** Outcome returned by {@link PedigreeBridge.exportOrShareBinary}. */
 export interface BinaryExportResult {
   ok: boolean;
   handledBy: 'android' | 'ios' | 'web-share' | 'web-download' | 'error';
   error?: string;
 }
 
+/** Snapshot payload mirrored to the native backup vault via {@link PedigreeBridge.syncBackupSnapshotToNative}. */
 export interface BackupSnapshotInput {
+  /** Identifier sanitized to `[A-Za-z0-9_-]` (max 48 chars) by `NativeBackupVault`. */
   snapshotId: string;
+  /** ISO-8601 UTC timestamp string. */
   createdAt: string;
+  /** File extension format stored in `filesDir/pedigree-vault/`. */
   format: 'json' | 'sqlite' | 'zip';
+  /** Serialized snapshot bytes (native vault enforces a 16 MiB maximum). */
   bytes: Uint8Array | ArrayBuffer;
   metadata?: Record<string, unknown>;
 }
 
+/** Diagnostic event recorded locally inside the TypeScript bridge (e.g. blocked URLs or timeouts). */
 export interface BridgeDiagnosticEvent {
   timestamp: string;
   level: 'info' | 'warn' | 'error';
@@ -55,7 +98,9 @@ export interface BridgeDiagnosticEvent {
   message: string;
 }
 
+/** Callback registered with {@link PedigreeBridge.registerBackHandler}. Return `true` if the back press was consumed. */
 export type BackHandler = () => boolean | Promise<boolean>;
+/** Subscriber notified whenever the bridge records a {@link BridgeDiagnosticEvent}. */
 export type DiagnosticEventListener = (event: BridgeDiagnosticEvent) => void;
 
 interface AndroidWebMessageEvent {
@@ -96,6 +141,7 @@ interface PendingRequest<T> {
   timer: ReturnType<typeof setTimeout>;
 }
 
+/** Default virtual HTTPS origin used by Android `WebViewAssetLoader`. */
 export const ANDROID_ASSET_ORIGIN = 'https://appassets.androidplatform.net';
 
 function getWindowRef(): WindowWithNativeBridge | undefined {
@@ -112,6 +158,11 @@ function toUint8Array(input: Uint8Array | ArrayBuffer): Uint8Array {
   return new Uint8Array(input);
 }
 
+/**
+ * Extracts an exact-length `ArrayBuffer` for `postMessage`.
+ * If `bytes` is a `subarray()` view into a larger backing buffer, `.slice(...)` prevents sending
+ * unintended prefix/trailing bytes across the Android WebMessage bridge.
+ */
 function toSlicedArrayBuffer(bytes: Uint8Array): ArrayBuffer {
   if (
     bytes.byteOffset === 0 &&
@@ -120,26 +171,25 @@ function toSlicedArrayBuffer(bytes: Uint8Array): ArrayBuffer {
   ) {
     return bytes.buffer;
   }
+  if (bytes.buffer instanceof ArrayBuffer) {
+    return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+  }
   const copy = new Uint8Array(bytes.byteLength);
   copy.set(bytes);
   return copy.buffer;
 }
 
 function uint8ArrayToBase64(bytes: Uint8Array): string {
-  const chunkSize = 0x8000;
+  if (typeof btoa !== 'function') {
+    return '';
+  }
+  const chunkSize = 0x1000;
   const parts: string[] = [];
   for (let i = 0; i < bytes.length; i += chunkSize) {
     const slice = bytes.subarray(i, Math.min(i + chunkSize, bytes.length));
-    let chunk = '';
-    for (let j = 0; j < slice.length; j += 1) {
-      chunk += String.fromCharCode(slice[j]);
-    }
-    parts.push(chunk);
+    parts.push(String.fromCharCode.apply(null, slice as unknown as number[]));
   }
-  if (typeof btoa === 'function') {
-    return btoa(parts.join(''));
-  }
-  return '';
+  return btoa(parts.join(''));
 }
 
 function createRequestId(prefix: string): string {
@@ -178,10 +228,15 @@ function parseEnvelope(raw: unknown): NativeEnvelope | null {
   return envelope;
 }
 
+/**
+ * Singleton-friendly native wrapper bridge with clean standard-browser fallbacks.
+ * Prefer importing {@link pedigreeBridge} in app code or {@link createPedigreeBridge} in unit tests.
+ */
 export class PedigreeBridge {
   private backEntries: RegisteredBackEntry[] = [];
   private nextBackEntryId = 1;
   private pendingContainerInfo = new Map<string, PendingRequest<NativeContainerInfo | null>>();
+  private pendingBlobRevokes = new Map<ReturnType<typeof setTimeout>, string>();
   private diagnosticListeners = new Set<DiagnosticEventListener>();
   private recentDiagnostics: BridgeDiagnosticEvent[] = [];
   private listenerAttached = false;
@@ -192,6 +247,7 @@ export class PedigreeBridge {
     this.ensureListenersAttached();
   }
 
+  /** Detects whether the app is running inside Android (`window.pedigreeNative`), iOS (`webkit.messageHandlers`), or a standard browser (`'web'`). */
   public getPlatform(): NativePlatform {
     const win = getWindowRef();
     if (!win) {
@@ -211,10 +267,12 @@ export class PedigreeBridge {
     return 'web';
   }
 
+  /** Returns `true` when running inside the Android or iOS native shell (`getPlatform() !== 'web'`). */
   public isNativeWrapper(): boolean {
     return this.getPlatform() !== 'web';
   }
 
+  /** Returns the current page origin used to validate incoming `WebMessageCompat` events. */
   public getExpectedOrigin(): string {
     const win = getWindowRef();
     if (win && win.location && typeof win.location.origin === 'string' && win.location.origin !== 'null') {
@@ -223,6 +281,7 @@ export class PedigreeBridge {
     return ANDROID_ASSET_ORIGIN;
   }
 
+  /** Subscribes to bridge diagnostic events (e.g. blocked schemes, origin mismatches, timeouts). Returns an unsubscribe callback. */
   public onDiagnostic(listener: DiagnosticEventListener): () => void {
     this.diagnosticListeners.add(listener);
     return () => {
@@ -230,10 +289,20 @@ export class PedigreeBridge {
     };
   }
 
+  /** Returns a shallow copy of up to 50 recent bridge diagnostic events. */
   public getDiagnosticEvents(): BridgeDiagnosticEvent[] {
     return this.recentDiagnostics.slice();
   }
 
+  /**
+   * Registers a Back-press handler and returns an unregister function.
+   *
+   * Convention:
+   * - Register route-level unwinding at `priority = 0`.
+   * - Register modal/dialog close handlers at `priority >= 5` (e.g. `10`) so open dialogs
+   *   always close before the underlying route steps back.
+   * - Within equal priority, handlers run LIFO (most recently registered first).
+   */
   public registerBackHandler(handler: BackHandler, priority = 0): () => void {
     this.ensureListenersAttached();
     const id = this.nextBackEntryId;
@@ -248,6 +317,7 @@ export class PedigreeBridge {
     };
   }
 
+  /** Evaluates registered Back handlers in priority-descending, LIFO order until one returns `true`. */
   public async dispatchBackPress(): Promise<boolean> {
     // Evaluate highest priority first; within same priority evaluate LIFO (most recently added first).
     const snapshot = this.backEntries.slice().sort(function (a, b) {
@@ -274,6 +344,13 @@ export class PedigreeBridge {
     return false;
   }
 
+  /**
+   * Exports or shares a binary payload (`Uint8Array` or `ArrayBuffer`).
+   * - **Android**: sends `BEGIN_BINARY_TRANSFER` metadata followed immediately by the sliced `ArrayBuffer`
+   *   so `FileAndExportBridge.kt` can launch SAF (`mode: 'save'`) or `FileProvider` Share (`mode: 'share'`).
+   * - **iOS**: serializes as base64 in an `EXPORT_OR_SHARE_BINARY` envelope for `WKScriptMessageHandler`.
+   * - **Web**: attempts `navigator.share({ files })` when `mode === 'share'`, falling back to a Blob `<a download>`.
+   */
   public async exportOrShareBinary(options: BinaryExportOptions): Promise<BinaryExportResult> {
     this.ensureListenersAttached();
     const bytes = toUint8Array(options.bytes);
@@ -359,6 +436,10 @@ export class PedigreeBridge {
     return this.triggerBrowserDownload(slicedBuffer, options.filename, options.mimeType);
   }
 
+  /**
+   * Triggers native printing / "Save as PDF" (`REQUEST_PRINT` on Android/iOS, `window.print()` on web).
+   * Required because `window.print()` is a silent no-op inside Android `WebView`.
+   */
   public requestPrint(): boolean {
     this.ensureListenersAttached();
     const platform = this.getPlatform();
@@ -379,6 +460,11 @@ export class PedigreeBridge {
     return false;
   }
 
+  /**
+   * Safely opens an external `https:` or `mailto:` URL.
+   * Rejects `http:`, `file:`, `javascript:`, `data:`, `blob:`, and malformed URLs (returning `false`).
+   * On Android, routes `https:` to Custom Tabs and `mailto:` to `Intent.ACTION_SENDTO`.
+   */
   public openExternalUrl(url: string, purpose?: string): boolean {
     this.ensureListenersAttached();
     let parsed: URL;
@@ -436,6 +522,7 @@ export class PedigreeBridge {
     return true;
   }
 
+  /** Opens the native Android Developer & Diagnostics dialog (`false` when running in a standard browser). */
   public openNativeDevPanel(): boolean {
     this.ensureListenersAttached();
     if (!this.isNativeWrapper()) {
@@ -447,6 +534,10 @@ export class PedigreeBridge {
     });
   }
 
+  /**
+   * Queries native WebView runtime & backup vault metadata (`GET_CONTAINER_INFO`).
+   * Resolves immediately to `null` in a standard browser or if the native reply exceeds `timeoutMs` (default 400ms).
+   */
   public getNativeContainerInfo(timeoutMs = 400): Promise<NativeContainerInfo | null> {
     this.ensureListenersAttached();
     if (!this.isNativeWrapper()) {
@@ -477,6 +568,10 @@ export class PedigreeBridge {
     });
   }
 
+  /**
+   * Mirrors a serialized backup snapshot to `filesDir/pedigree-vault/` on Android (or iOS handler).
+   * Keep payloads under 16 MiB; the native vault skips redundant writes via SHA-256 deduplication.
+   */
   public syncBackupSnapshotToNative(snapshot: BackupSnapshotInput): Promise<boolean> {
     this.ensureListenersAttached();
     const platform = this.getPlatform();
@@ -545,6 +640,10 @@ export class PedigreeBridge {
     }
   }
 
+  /**
+   * Processes an incoming message from the native host, rejecting any event whose `origin`
+   * does not match {@link getExpectedOrigin}.
+   */
   public handleIncomingNativeMessage(rawData: unknown, origin?: string): void {
     if (origin && origin !== 'null' && origin !== this.getExpectedOrigin()) {
       this.recordDiagnostic(
@@ -575,15 +674,10 @@ export class PedigreeBridge {
     }
   }
 
+  /** Detaches listeners, cancels pending timers/requests, and revokes any unrevoked Blob URLs. */
   public destroy(): void {
     const win = getWindowRef();
-    if (this.boundAndroidObject && this.boundMessageHandler) {
-      if (typeof this.boundAndroidObject.removeEventListener === 'function') {
-        this.boundAndroidObject.removeEventListener('message', this.boundMessageHandler);
-      } else if (this.boundAndroidObject.onmessage === this.boundMessageHandler) {
-        this.boundAndroidObject.onmessage = null;
-      }
-    }
+    this.detachAndroidListener();
     if (win && win.__pedigreeBridgeReceive) {
       delete win.__pedigreeBridgeReceive;
     }
@@ -592,9 +686,16 @@ export class PedigreeBridge {
       entry.resolve(null);
     });
     this.pendingContainerInfo.clear();
+    this.pendingBlobRevokes.forEach(function (objectUrl, timer) {
+      clearTimeout(timer);
+      if (typeof URL !== 'undefined' && typeof URL.revokeObjectURL === 'function') {
+        URL.revokeObjectURL(objectUrl);
+      }
+    });
+    this.pendingBlobRevokes.clear();
     this.backEntries = [];
-    this.boundAndroidObject = null;
-    this.boundMessageHandler = null;
+    this.recentDiagnostics = [];
+    this.diagnosticListeners.clear();
     this.listenerAttached = false;
   }
 
@@ -653,6 +754,7 @@ export class PedigreeBridge {
 
     const androidObj = this.getAndroidObject();
     if (androidObj && androidObj !== this.boundAndroidObject) {
+      this.detachAndroidListener();
       const handler = (event: AndroidWebMessageEvent) => {
         this.handleIncomingNativeMessage(event ? event.data : undefined, event ? event.origin : undefined);
       };
@@ -664,6 +766,18 @@ export class PedigreeBridge {
       this.boundAndroidObject = androidObj;
       this.boundMessageHandler = handler;
     }
+  }
+
+  private detachAndroidListener(): void {
+    if (this.boundAndroidObject && this.boundMessageHandler) {
+      if (typeof this.boundAndroidObject.removeEventListener === 'function') {
+        this.boundAndroidObject.removeEventListener('message', this.boundMessageHandler);
+      } else if (this.boundAndroidObject.onmessage === this.boundMessageHandler) {
+        this.boundAndroidObject.onmessage = null;
+      }
+    }
+    this.boundAndroidObject = null;
+    this.boundMessageHandler = null;
   }
 
   private getAndroidObject(): AndroidPedigreeNativeObject | null {
@@ -751,9 +865,12 @@ export class PedigreeBridge {
       } else {
         anchor.click();
       }
-      setTimeout(function () {
+      const self = this;
+      const revokeTimer = setTimeout(function () {
+        self.pendingBlobRevokes.delete(revokeTimer);
         URL.revokeObjectURL(objectUrl);
-      }, 1000);
+      }, 10000);
+      this.pendingBlobRevokes.set(revokeTimer, objectUrl);
       return { ok: true, handledBy: 'web-download' };
     } catch (err) {
       return {
@@ -789,8 +906,10 @@ export class PedigreeBridge {
   }
 }
 
+/** Creates an isolated {@link PedigreeBridge} instance (primarily for unit tests). */
 export function createPedigreeBridge(): PedigreeBridge {
   return new PedigreeBridge();
 }
 
+/** Shared singleton bridge instance used across the wrapped PWA. */
 export const pedigreeBridge = createPedigreeBridge();

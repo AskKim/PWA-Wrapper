@@ -1,6 +1,16 @@
 /**
  * Community Pedigree — Native Bridge Unit Tests
  * SPDX-License-Identifier: AGPL-3.0-or-later
+ *
+ * Run with: `npm test`
+ *
+ * Verifies:
+ * 1. Standard browser fallbacks (`window.print()`, Blob downloads + cleanup, `null` container info)
+ * 2. Strict `https:` / `mailto:` protocol allowlisting in `openExternalUrl`
+ * 3. Android `WebMessageListener` two-frame binary streaming (`BEGIN_BINARY_TRANSFER` + sliced `ArrayBuffer`)
+ * 4. Priority + LIFO Back handler unwinding (`NATIVE_BACK` -> `NATIVE_BACK_RESULT`)
+ * 5. Origin-spoof rejection & 400ms `GET_CONTAINER_INFO` timeout behavior
+ * 6. iOS `WKScriptMessageHandler` base64 envelope serialization
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
@@ -118,8 +128,43 @@ describe('PedigreeBridge', () => {
       expect(createdAnchors[0].download).toBe('barn-backup.zip');
       expect(createdAnchors[0].click).toHaveBeenCalledTimes(1);
 
-      vi.advanceTimersByTime(1000);
+      vi.advanceTimersByTime(10000);
       expect(revokeObjectURL).toHaveBeenCalledWith('blob:mock-backup');
+    });
+
+    it('revokes pending blob URLs and clears listeners on destroy()', async () => {
+      setupMockDom('https://askkim.github.io');
+      const createObjectURL = vi.fn(() => 'blob:pending-cleanup');
+      const revokeObjectURL = vi.fn();
+      vi.stubGlobal('URL', class extends URL {
+        static createObjectURL = createObjectURL;
+        static revokeObjectURL = revokeObjectURL;
+      });
+      vi.stubGlobal('navigator', {});
+
+      bridge = createPedigreeBridge();
+      await bridge.exportOrShareBinary({
+        filename: 'pending.zip',
+        mimeType: 'application/zip',
+        mode: 'save',
+        bytes: new Uint8Array([1, 2]),
+      });
+
+      bridge.destroy();
+      expect(revokeObjectURL).toHaveBeenCalledWith('blob:pending-cleanup');
+    });
+
+    it('returns false for syncBackupSnapshotToNative in standard browser', async () => {
+      setupMockDom('https://askkim.github.io');
+      bridge = createPedigreeBridge();
+
+      const ok = await bridge.syncBackupSnapshotToNative({
+        snapshotId: 'web_noop',
+        createdAt: '2026-11-19T15:00:00.000Z',
+        format: 'json',
+        bytes: new Uint8Array([123, 125]),
+      });
+      expect(ok).toBe(false);
     });
   });
 
